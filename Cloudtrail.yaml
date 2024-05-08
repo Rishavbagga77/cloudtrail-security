@@ -1,22 +1,18 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: CloudTrail Trail with S3 Bucket and CloudWatch Log Integration
-Parameters: 
-  UniqueBucketName:
-    Type: String
-    Description: Bucket to be used in Cloudtrail Logging
-    Default: cloudtraileventstlsnclouds
+Parameters:
   LoggingGroup:
     Type: String
     Description: Log Group to be used in Cloudtrail Events
-    Default: cloudtrailloggingtlsnclouds
+    Default: tae-cloudtrail-logging
   RoleName:
     Type: String
     Description: Role for LogGroup
-    Default: cloudtrailloggingroletlsnclouds
+    Default: CloudTrailLoggingRole
   TopicName:
     Type: String
     Description:  Topic Name
-    Default: CloudtrailEvents
+    Default: CloudTrailEvents
   EmailID:
     Type: String
     Description:  Email ID to send Notifications for cloudtrail events
@@ -47,7 +43,15 @@ Resources:
   Bucket:
     Type: 'AWS::S3::Bucket'
     Properties:
-      BucketName: !Ref UniqueBucketName
+      BucketName: !Sub 'tae-cloudtrail-events-${AWS::AccountId}'
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+        - Id: DeleteContentAfter90Days
+          Prefix: ''
+          Status: Enabled
+          ExpirationInDays: '90'
   BucketPolicy:
     Type: 'AWS::S3::BucketPolicy'
     Properties:
@@ -110,22 +114,74 @@ Resources:
                     - "LogGroup"
                     - "Arn"
       RoleName: !Ref RoleName
+  myKey:
+    Type: 'AWS::KMS::Key'
+    Properties:
+      Description: An example symmetric encryption KMS key
+      EnableKeyRotation: true
+      KeyUsage: ENCRYPT_DECRYPT
+      KeyPolicy:
+        Version: 2012-10-17
+        Id: key-default-1
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: 'kms:*'
+            Resource: "*"
+          - Sid: Allow_CloudWatch_for_CMK
+            Effect: Allow
+            Principal:
+              Service:
+              - cloudwatch.amazonaws.com
+            Action:
+            - kms:Decrypt
+            - kms:GenerateDataKey*
+            Resource: "*"
+  myKeyalias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: "alias/CWSNS"
+      TargetKeyId: !Ref myKey
   Topic:
     Type: 'AWS::SNS::Topic'
     Properties:
       TopicName: !Ref TopicName
-      KmsMasterKeyId: "alias/aws/sns"
+      KmsMasterKeyId: !GetAtt myKey.KeyId
+  TopicPolicy:
+    Type: 'AWS::SNS::TopicPolicy'
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Sid: AllowServices
+            Effect: Allow
+            Principal:
+              Service:
+                - events.amazonaws.com
+                - cloudwatch.amazonaws.com
+            Action: 
+            - sns:Publish
+            Resource: "*"
+          - Sid: AllowAWS
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: 
+            - sns:Publish
+            Resource: "*" 
+      Topics:
+        - !Ref Topic
   MySubscription:
     Type: 'AWS::SNS::Subscription'
     Properties:
       Endpoint: !Ref EmailID
       Protocol: "email"
       TopicArn: !GetAtt Topic.TopicArn
-
   SecurityGroupConfigChange:
     Type: 'AWS::Logs::MetricFilter'
     Properties:
-      LogGroupName: 
+      LogGroupName:
         Ref: "LogGroup"
       MetricTransformations:
         - MetricValue: "1"
@@ -134,11 +190,11 @@ Resources:
           Unit: "Count"
           DefaultValue: 0
       FilterPattern: '{ ($.eventName = AuthorizeSecurityGroupIngress) || ($.eventName = AuthorizeSecurityGroupEgress) || ($.eventName = RevokeSecurityGroupIngress) || ($.eventName = RevokeSecurityGroupEgress) || ($.eventName = CreateSecurityGroup) || ($.eventName = DeleteSecurityGroup) }'
-      FilterName: "SecurityGroupConfigChange"
+      FilterName: "SecurityGroupConfigChanges"
   SecurityGroupConfigChangeAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: "SecurityGroupConfigChange"
+      AlarmName: "SecurityGroupConfigChange-Alarm"
       AlarmActions:
         - !Ref Topic
       AlarmDescription: "Changes on security group's ingress traffic has been made or security group has been deleted, please check acitivity on cloudtrail events"
@@ -150,11 +206,12 @@ Resources:
       EvaluationPeriods: 1
       Period: 60
       TreatMissingData: "notBreaching"
+    
 
   AWSConfigChange:
     Type: 'AWS::Logs::MetricFilter'
     Properties:
-      LogGroupName: 
+      LogGroupName:
         Ref: "LogGroup"
       MetricTransformations:
         - MetricValue: "1"
@@ -163,13 +220,13 @@ Resources:
           Unit: "Count"
           DefaultValue: 0
       FilterPattern: '{ ($.eventSource = config.amazonaws.com) && (($.eventName = StopConfigurationRecorder)||($.eventName = DeleteDeliveryChannel)||($.eventName = PutDeliveryChannel)||($.eventName = PutConfigurationRecorder)) }'
-      FilterName: "AWSConfigChange"
+      FilterName: "AWSConfigChanges"
   AWSConfigChangeAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: "AWSConfigChange"
+      AlarmName: "AWSConfigChange-Alarm"
       AlarmActions:
-        - !Ref Topic
+        - !GetAtt Topic.TopicArn
       AlarmDescription: "AWS Config has detected some changes"
       Namespace: "CloudTrailMetrics"
       MetricName: "ConfigEventCount"
@@ -179,11 +236,12 @@ Resources:
       EvaluationPeriods: 1
       Period: 60
       TreatMissingData: "notBreaching"
+    
 
   UnauthorizedOperation:
     Type: 'AWS::Logs::MetricFilter'
     Properties:
-      LogGroupName: 
+      LogGroupName:
         Ref: "LogGroup"
       MetricTransformations:
         - MetricValue: "1"
@@ -192,11 +250,11 @@ Resources:
           Unit: "Count"
           DefaultValue: 0
       FilterPattern: '{($.errorCode = "*UnauthorizedOperation") || ($.errorCode = "AccessDenied*")}'
-      FilterName: "UnauthorizedOperation"
+      FilterName: "UnauthorizedOperations"
   UnauthorizedOperationAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: "UnauthorizedOperation"
+      AlarmName: "UnauthorizedOperation-Alarm"
       AlarmActions:
         - !Ref Topic
       AlarmDescription: "UnauthorizedOperation or AccessDenied"
@@ -208,11 +266,12 @@ Resources:
       EvaluationPeriods: 1
       Period: 60
       TreatMissingData: "notBreaching"
-
+    
+  
   S3BucketConfigChange:
     Type: 'AWS::Logs::MetricFilter'
     Properties:
-      LogGroupName: 
+      LogGroupName:
         Ref: "LogGroup"
       MetricTransformations:
         - MetricValue: "1"
@@ -221,13 +280,13 @@ Resources:
           Unit: "Count"
           DefaultValue: 0
       FilterPattern: '{ ($.eventSource = s3.amazonaws.com) && (($.eventName = PutBucketAcl) || ($.eventName = PutBucketPolicy) || ($.eventName = PutBucketCors) || ($.eventName = PutBucketLifecycle) || ($.eventName = PutBucketReplication) || ($.eventName = DeleteBucketPolicy) || ($.eventName = DeleteBucketCors) || ($.eventName = DeleteBucketLifecycle) || ($.eventName = DeleteBucketReplication)) }'
-      FilterName: "S3BucketConfigChange"
+      FilterName: "S3BucketConfigChanges"
   S3BucketConfigChangeAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: "S3BucketConfigChange"
+      AlarmName: "S3BucketConfigChange-Alarm"
       AlarmActions:
-        - !Ref Topic
+        - !GetAtt Topic.TopicArn
       AlarmDescription: "S3 Bucket Policy Configuration has been modified."
       Namespace: "CloudTrailMetrics"
       MetricName: "S3BucketEventCount"
@@ -237,11 +296,12 @@ Resources:
       EvaluationPeriods: 1
       Period: 60
       TreatMissingData: "notBreaching"
-
+    
+  
   VPCNetworkConfigChange:
     Type: 'AWS::Logs::MetricFilter'
     Properties:
-      LogGroupName: 
+      LogGroupName:
         Ref: "LogGroup"
       MetricTransformations:
         - MetricValue: "1"
@@ -250,13 +310,13 @@ Resources:
           Unit: "Count"
           DefaultValue: 0
       FilterPattern: '{ ($.eventName = CreateVpc) || ($.eventName = DeleteVpc) || ($.eventName = ModifyVpcAttribute) || ($.eventName = AcceptVpcPeeringConnection) || ($.eventName = CreateVpcPeeringConnection) || ($.eventName = DeleteVpcPeeringConnection) || ($.eventName = RejectVpcPeeringConnection) || ($.eventName = AttachClassicLinkVpc) || ($.eventName = DetachClassicLinkVpc) || ($.eventName = DisableVpcClassicLink) || ($.eventName = EnableVpcClassicLink) }'
-      FilterName: "VPCNetworkConfigChange"
+      FilterName: "VPCNetworkConfigChanges"
   VPCNetworkConfigChangeAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: "VPCNetworkConfigChange"
+      AlarmName: "VPCNetworkConfigChange-Alarm"
       AlarmActions:
-        - !Ref Topic
+        - !GetAtt Topic.TopicArn
       AlarmDescription: "VPC Configuration has been changed."
       Namespace: "CloudTrailMetrics"
       MetricName: "VpcEventCount"
@@ -266,11 +326,12 @@ Resources:
       EvaluationPeriods: 1
       Period: 60
       TreatMissingData: "notBreaching"
-
+    
+  
   RouteTableConfigChange:
     Type: 'AWS::Logs::MetricFilter'
     Properties:
-      LogGroupName: 
+      LogGroupName:
         Ref: "LogGroup"
       MetricTransformations:
         - MetricValue: "1"
@@ -279,11 +340,11 @@ Resources:
           Unit: "Count"
           DefaultValue: 0
       FilterPattern: '{ ($.eventName = CreateRoute) || ($.eventName = CreateRouteTable) || ($.eventName = ReplaceRoute) || ($.eventName = ReplaceRouteTableAssociation) || ($.eventName = DeleteRouteTable) || ($.eventName = DeleteRoute) || ($.eventName = DisassociateRouteTable) }'
-      FilterName: "RouteTableConfigChange"
+      FilterName: "RouteTableConfigChanges"
   RouteTableConfigChangeAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: "RouteTableConfigChange"
+      AlarmName: "RouteTableConfigChange-Alarm"
       AlarmActions:
         - !Ref Topic
       AlarmDescription: "changes to Route Table has been detected."
@@ -294,12 +355,13 @@ Resources:
       Threshold: 0
       EvaluationPeriods: 1
       Period: 60
-      TreatMissingData: "notBreaching" 
-
+      TreatMissingData: "notBreaching"
+    
+  
   AWSConsoleSignInFailure:
     Type: 'AWS::Logs::MetricFilter'
     Properties:
-      LogGroupName: 
+      LogGroupName:
         Ref: "LogGroup"
       MetricTransformations:
         - MetricValue: "1"
@@ -308,13 +370,13 @@ Resources:
           Unit: "Count"
           DefaultValue: 0
       FilterPattern: '{ ($.eventName = ConsoleLogin) && ($.errorMessage = "Failed authentication") }'
-      FilterName: "AWSConsoleSignInFailure"      
+      FilterName: "AWSConsoleSignInFailures"
   AWSConsoleSignInFailureAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: "AWSConsoleSignInFailure"
+      AlarmName: "AWSConsoleSignInFailure-Alarm"
       AlarmActions:
-        - !Ref Topic
+        - !GetAtt Topic.TopicArn
       AlarmDescription: "changes to NACL detected."
       Namespace: "CloudTrailMetrics"
       MetricName: "ConsoleSigninFailureCount"
@@ -324,11 +386,12 @@ Resources:
       EvaluationPeriods: 5
       Period: 60
       TreatMissingData: "notBreaching"
-
+    
+  
   NetworkACLConfigChange:
     Type: 'AWS::Logs::MetricFilter'
     Properties:
-      LogGroupName: 
+      LogGroupName:
         Ref: "LogGroup"
       MetricTransformations:
         - MetricValue: "1"
@@ -337,11 +400,11 @@ Resources:
           Unit: "Count"
           DefaultValue: 0
       FilterPattern: '{ ($.eventName = CreateNetworkAcl) || ($.eventName = CreateNetworkAclEntry) || ($.eventName = DeleteNetworkAcl) || ($.eventName = DeleteNetworkAclEntry) || ($.eventName = ReplaceNetworkAclEntry) || ($.eventName = ReplaceNetworkAclAssociation) }'
-      FilterName: "NetworkACLConfigChange"
+      FilterName: "NetworkACLConfigChanges"
   NetworkACLConfigChangeAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: "NetworkACLConfigChange"
+      AlarmName: "NetworkACLConfigChange-Alarm"
       AlarmActions:
         - !Ref Topic
       AlarmDescription: "changes to NACL detected."
@@ -353,11 +416,12 @@ Resources:
       EvaluationPeriods: 1
       Period: 60
       TreatMissingData: "notBreaching"
-
+    
+  
   VPCGatewayConfigChange:
     Type: 'AWS::Logs::MetricFilter'
     Properties:
-      LogGroupName: 
+      LogGroupName:
         Ref: "LogGroup"
       MetricTransformations:
         - MetricValue: "1"
@@ -366,13 +430,13 @@ Resources:
           Unit: "Count"
           DefaultValue: 0
       FilterPattern: '{ ($.eventName = CreateCustomerGateway) || ($.eventName = DeleteCustomerGateway) || ($.eventName = AttachInternetGateway) || ($.eventName = CreateInternetGateway) || ($.eventName = DeleteInternetGateway) || ($.eventName = DetachInternetGateway) }'
-      FilterName: "VPCGatewayConfigChange"
+      FilterName: "VPCGatewayConfigChanges"
   VPCGatewayConfigChangeAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: "VPCGatewayConfigChange"
+      AlarmName: "VPCGatewayConfigChange-Alarm"
       AlarmActions:
-        - !Ref Topic
+        - !GetAtt Topic.TopicArn
       AlarmDescription: "changes to network gateway detected."
       Namespace: "CloudTrailMetrics"
       MetricName: "GatewayEventCount"
@@ -382,11 +446,12 @@ Resources:
       EvaluationPeriods: 1
       Period: 60
       TreatMissingData: "notBreaching"
-
+    
+  
   RootAccountUsage:
     Type: 'AWS::Logs::MetricFilter'
     Properties:
-      LogGroupName: 
+      LogGroupName:
         Ref: "LogGroup"
       MetricTransformations:
         - MetricValue: "1"
@@ -395,11 +460,11 @@ Resources:
           Unit: "Count"
           DefaultValue: 0
       FilterPattern: '{ $.userIdentity.type = "Root" && $.userIdentity.invokedBy NOT EXISTS && $.eventType != "AwsServiceEvent" }'
-      FilterName: "RootAccountUsage"
+      FilterName: "RootAccountUsages"
   RootAccountUsageAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: "RootAccountUsage"
+      AlarmName: "RootAccountUsage-Alarm"
       AlarmActions:
         - !Ref Topic
       AlarmDescription: "Root Login has been detected on aws account."
@@ -411,11 +476,12 @@ Resources:
       EvaluationPeriods: 1
       Period: 60
       TreatMissingData: "notBreaching"
-
+    
+  
   SigninWoMFA:
     Type: 'AWS::Logs::MetricFilter'
     Properties:
-      LogGroupName: 
+      LogGroupName:
         Ref: "LogGroup"
       MetricTransformations:
         - MetricValue: "1"
@@ -424,13 +490,13 @@ Resources:
           Unit: "Count"
           DefaultValue: 0
       FilterPattern: '{ $.eventName = "ConsoleLogin" && $.additionalEventData.MFAUsed = "No" }'
-      FilterName: "ConsoleSignInWithoutMfa"
+      FilterName: "ConsoleSignInWithoutMfas"
   ConsoleSignInWithoutMfaAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: "ConsoleSignInWithoutMfa"
+      AlarmName: "ConsoleSignInWithoutMfa-Alarm"
       AlarmActions:
-        - !Ref Topic
+        - !GetAtt Topic.TopicArn
       AlarmDescription: "User has been logged in to aws console having no MFA Enabled, please review and ask user to enable MFA to add Security layer."
       Namespace: "CloudTrailMetrics"
       MetricName: "ConsoleSignInWithoutMfaCount"
@@ -440,11 +506,12 @@ Resources:
       EvaluationPeriods: 1
       Period: 60
       TreatMissingData: "notBreaching"
-
+    
+  
   AWSCMKChange:
     Type: 'AWS::Logs::MetricFilter'
     Properties:
-      LogGroupName: 
+      LogGroupName:
         Ref: "LogGroup"
       MetricTransformations:
         - MetricValue: "1"
@@ -453,13 +520,13 @@ Resources:
           Unit: "Count"
           DefaultValue: 0
       FilterPattern: '{ ($.eventSource = kms.amazonaws.com) && (($.eventName = DisableKey) || ($.eventName = ScheduleKeyDeletion)) }'
-      FilterName: "AWSCMKChange"
+      FilterName: "AWSCMKChanges"
   AWSCMKChangeAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: "AWSCMKChange"
+      AlarmName: "AWSCMKChange-Alarm"
       AlarmActions:
-        - !Ref Topic
+        - !GetAtt Topic.TopicArn
       AlarmDescription: "customer managed keys state has been changed"
       Namespace: "CloudTrailMetrics"
       MetricName: "CMKEventCount"
@@ -469,11 +536,12 @@ Resources:
       EvaluationPeriods: 1
       Period: 60
       TreatMissingData: "notBreaching"
-
+    
+  
   IAMPolicyChanges:
     Type: 'AWS::Logs::MetricFilter'
     Properties:
-      LogGroupName: 
+      LogGroupName:
         Ref: "LogGroup"
       MetricTransformations:
         - MetricValue: "1"
@@ -482,11 +550,11 @@ Resources:
           Unit: "Count"
           DefaultValue: 0
       FilterPattern: '{ ($.eventName = DeleteGroupPolicy) || ($.eventName = DeleteRolePolicy) || ($.eventName = DeleteUserPolicy) || ($.eventName = PutGroupPolicy) || ($.eventName = PutRolePolicy) || ($.eventName = PutUserPolicy) || ($.eventName = CreatePolicy) || ($.eventName = DeletePolicy) || ($.eventName = CreatePolicyVersion) || ($.eventName = DeletePolicyVersion) || ($.eventName = AttachRolePolicy) || ($.eventName = DetachRolePolicy) || ($.eventName = AttachUserPolicy) || ($.eventName = DetachUserPolicy) || ($.eventName = AttachGroupPolicy) || ($.eventName = DetachGroupPolicy) }'
-      FilterName: "IAMAuthConfigChange"
+      FilterName: "IAMAuthConfigChanges"
   IAMPolicyChangesAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: "IAMPolicyChanges"
+      AlarmName: "IAMPolicyChange-Alarm"
       AlarmActions:
         - !Ref Topic
       AlarmDescription: "IAMPolicy has been Changed"
