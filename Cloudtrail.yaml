@@ -383,7 +383,7 @@ Resources:
       Statistic: "Sum"
       ComparisonOperator: "GreaterThanThreshold"
       Threshold: 5
-      EvaluationPeriods: 5
+      EvaluationPeriods: 1
       Period: 60
       TreatMissingData: "notBreaching"
     
